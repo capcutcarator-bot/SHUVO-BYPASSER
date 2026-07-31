@@ -34,7 +34,11 @@ OPENROUTER_MODELS  = [
 # ============================================
 # TELETHON CLIENT
 # ============================================
-client: TelegramClient = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+# NOTE: client is now created INSIDE start_client(), after the dedicated
+# event loop is created and set as current. Creating it here at import time
+# binds it to the wrong (main-thread) loop and causes silent hangs / timeouts
+# on /bypass once it actually runs on the background thread's loop.
+client: TelegramClient = None
 telegram_loop: asyncio.AbstractEventLoop = None
 
 # Thread-pool for blocking AI calls (keeps event loop free)
@@ -172,7 +176,6 @@ def extract_bypass_link(text: str) -> str | None:
 # ============================================
 # TELEGRAM EVENT HANDLER
 # ============================================
-@client.on(events.NewMessage(from_users=BOT_USERNAME))
 async def handler(event):
     global active_session
     msg  = event.message
@@ -273,12 +276,12 @@ def bypass():
     if request.method == "GET":
         url = request.args.get("url")
     else:
-        url = (request.json or {}).get("url")
+        url = (request.get_json(silent=True) or {}).get("url")
 
     if not url:
         return jsonify({"error": "❌ URL required", "example": "/bypass?url=https://..."}), 400
 
-    if telegram_loop is None:
+    if telegram_loop is None or client is None:
         return jsonify({"error": "Telegram client not ready, retry in a moment"}), 503
 
     print(f"\n{'='*55}\n🎯 TARGET: {url}\n{'='*55}")
@@ -312,7 +315,7 @@ def status():
     return jsonify({
         "status":        "🟢 ONLINE",
         "bot":           BOT_USERNAME,
-        "telegram":      "✅ CONNECTED" if telegram_loop else "⏳ CONNECTING",
+        "telegram":      "✅ CONNECTED" if telegram_loop and client else "⏳ CONNECTING",
         "ai_provider":   "OpenRouter",
         "active_bypass": active_session.url if active_session else None,
     })
@@ -339,25 +342,31 @@ async def _run_telegram():
         print("❌ Session not authorized — generate a new session string.")
         return
     print("📡 Telegram client connected.")
+    client.add_event_handler(handler, events.NewMessage(from_users=BOT_USERNAME))
     await client.run_until_disconnected()
 
 
 def start_client():
-    global telegram_loop
+    global telegram_loop, client
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     telegram_loop = loop
+
+    # Create the client HERE, now that this thread's loop is current.
+    # This is the actual fix: previously the client was created at
+    # import time on the main thread's default loop, then connected on
+    # a different loop here — that mismatch caused /bypass to hang/timeout.
+    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH, loop=loop)
+
     loop.run_until_complete(_run_telegram())
 
 
 # ============================================
 # ENTRY POINT
 # ============================================
-if __name__ == "__main__":
-    t = threading.Thread(target=start_client, daemon=True)
-    t.start()
-    time.sleep(3)   # let Telegram connect first
+t = threading.Thread(target=start_client, daemon=True)
+t.start()
 
-    print("🔥 DEMON 😈 CAPTCHA BYPASS API STARTED!")
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+print("🔥 DEMON 😈 CAPTCHA BYPASS API STARTED!")
+port = int(os.environ.get("PORT", 5000))
+app.run(host="0.0.0.0", port=port, debug=False)
