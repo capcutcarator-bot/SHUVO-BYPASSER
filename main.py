@@ -155,19 +155,29 @@ async def click_captcha_button(msg, number: str) -> bool:
 # ============================================
 def extract_bypass_link(text: str) -> str | None:
     """Return the bypassed URL from the bot's response, or None."""
-    # Priority 1: "Bypassed Link: <url>"
+    # Priority 1: "Bypassed Link: <url>" — emoji/symbols বা যাই থাকুক handle করবে
     m = re.search(
-        r"[Bb]ypass(?:ed)?\s*[Ll]ink\s*[:\*]*\s*\*{0,2}(https?://[^\s\*\)\n]+)",
+        r"[Bb]ypass(?:ed)?\s*[Ll]ink\s*[^\n]{0,30}?(https?://[^\s\*\)\n]+)",
         text,
     )
     if m:
         return m.group(1).rstrip("*").strip()
 
-    # Priority 2: any telegram.me / t.me / known bypass domain
+    # Priority 2: "Original Link" লাইন বাদ দিয়ে বাকি line থেকে URL নেবে
+    for line in text.split("\n"):
+        if re.search(r"[Oo]riginal\s*[Ll]ink", line):
+            continue
+        links = re.findall(r"https?://[^\s\*\)\n]+", line)
+        for link in links:
+            link = link.rstrip("*").strip()
+            if link:
+                return link
+
+    # Fallback: যেকোনো URL
     links = re.findall(r"https?://[^\s\*\)\n]+", text)
     for link in links:
         link = link.rstrip("*").strip()
-        if any(d in link for d in ("telegram.me", "t.me", "bypass", "pages.dev")):
+        if link:
             return link
 
     return None
