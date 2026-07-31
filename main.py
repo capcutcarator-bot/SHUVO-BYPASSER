@@ -5,453 +5,359 @@ from flask import Flask, request, jsonify
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 import asyncio
-import json
 import base64
 import time
-import io
-from PIL import Image
 import threading
+import concurrent.futures
 
 app = Flask(__name__)
 
 # ============================================
-# CACHE SYSTEM
-# TTL = 6 hours — same URL won't hit Nick Bot again within this window
+# CREDENTIALS
 # ============================================
-CACHE_TTL = 6 * 60 * 60  # seconds
-_cache = {}          # url → {"bypassed": str, "ts": float}
-_cache_lock = threading.Lock()
-
-def cache_get(url):
-    with _cache_lock:
-        entry = _cache.get(url)
-        if entry and (time.time() - entry["ts"]) < CACHE_TTL:
-            return entry["bypassed"]
-        return None
-
-def cache_set(url, bypassed):
-    with _cache_lock:
-        _cache[url] = {"bypassed": bypassed, "ts": time.time()}
-
-def cache_stats():
-    with _cache_lock:
-        now = time.time()
-        total = len(_cache)
-        alive = sum(1 for e in _cache.values() if (now - e["ts"]) < CACHE_TTL)
-        return {"total_entries": total, "alive_entries": alive, "ttl_hours": CACHE_TTL // 3600}
-
-# ============================================
-# HARDCODED CREDENTIALS
-# ============================================
-API_ID = 32128791
+API_ID   = 32128791
 API_HASH = "b6274d1ac3319bffcab4f9a6015167c7"
-_HARDCODED_SESSION = "1BVtsOIsBu7Axbr3oiCPGfeuFvwFiORM4OJ3_jK8ima3QskuU-zRRM7XyS9ahPWjJu0mQ5cMx9QmAsiUOEhU-mh5IIIXaT_uWvWe_qIOJRLvFBWBF5GdjPLH5Q5FuO4JHDIjpKB0NPwPc0y3Y7Up3YIXZC5WybWIXUcAN1VRnE7k8e1SLXOw1nsEpHWNI5XoYIez3e8hYSM2ZhWCcg5BA6ae_JhpDwcu54nYk-obuiAeqQkocIe-yJwO16Gq_Z1RDTkvgBxjXWk7lezr6xZSZ0416_14EqZJF5U9DpneIf0srfE9MS-OwzrfVZGj4HTDD3LRcmIrk_gMxGgal1FQuxTSiIQiedBc="
-SESSION_STRING = os.environ.get("SESSION_STRING") or _HARDCODED_SESSION
+SESSION_STRING = "1BVtsOIUBu4TABaLL5kHp3xxWNK51-5YvHvkh3zZovXfB4j8LXmTqG66ZyPsPACY4g5NblnG7OnMJveB1nVd-wBMjsLrAFzXwjiZB1ar6ikvEayOq638hhy2izZjPtiw7spAFyejgp1351d2tUoIdhuSuxliJTlVM9s2zyz4oVRGdIvIibKLCKdKVKmm5B6N30BczeKuez0R6l3N1OjEPK1alfV-t2EcTwTSsJKODDzkfRb0XiqXi4qa-PpGGTneii2Jqxo_ru2VmA3u2OzKnsYMj_-Sem4LBcaZqUj-KsOe_OOo4jIam5756v76FrkKI9LMBM6715xRKcofc68aLoM5R9WlnN0w="
 BOT_USERNAME = "Nick_Bypass_Bot"
 
 # ============================================
-# GITHUB ACCESS TOKEN
+# OPENROUTER — FREE AI VISION
 # ============================================
-GITHUB_TOKEN = "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"
-
-GITHUB_API_URL = "https://models.inference.ai.azure.com/chat/completions"
+OPENROUTER_API_KEY = "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"
+OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODELS  = [
+    "nvidia/nemotron-nano-12b-v2-vl:free",               # best free vision model
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", # omni fallback
+    "google/gemma-4-27b-it:free",                         # gemma fallback
+]
 
 # ============================================
-# CAPTCHA SOLVE — GRID TYPE (@CaptchaAPI)
-#
-# The captcha is a colored grid (4x4).
-# Each colored box has a small number in its corner.
-# One box contains a ghost/icon image.
-# Task: find which box has the icon → return its number.
+# TELETHON CLIENT
 # ============================================
-CAPTCHA_PROMPT = (
-    "This is a grid CAPTCHA image (from @CaptchaAPI). "
-    "It shows a 4×4 grid of colored boxes (green and pink). "
-    "Each box has a small number printed in one of its corners. "
-    "Exactly ONE box contains a small icon or ghost image inside it — all other boxes are empty (just a number). "
-    "Your task: identify the box that contains the icon/ghost image, "
-    "then read the small number printed in that same box. "
-    "Reply with ONLY that number — no words, no explanation, just the digits."
-)
+client: TelegramClient = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+telegram_loop: asyncio.AbstractEventLoop = None
 
-def solve_captcha_github_ai(image_data):
-    """Try GPT-4o then Phi-3.5-vision to read the grid captcha number."""
+# Thread-pool for blocking AI calls (keeps event loop free)
+_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+# ============================================
+# BYPASS SESSION STATE
+# ============================================
+class BypassSession:
+    def __init__(self, url: str):
+        self.url            = url
+        self.result: str    = None
+        self.bypass_done: asyncio.Event = None
+        self.attempts       = 0
+        self.max_attempts   = 3
+
+active_session: BypassSession = None   # one bypass at a time
+
+# ============================================
+# AI CAPTCHA SOLVER
+# ============================================
+def solve_captcha(image_data: bytes) -> str | None:
+    """
+    OwnCaptcha: grid of numbered boxes, one box has a special icon inside.
+    Return the number written in that box, or None on failure.
+    """
     try:
-        img_b64 = base64.b64encode(image_data).decode('utf-8')
-
+        img_b64 = base64.b64encode(image_data).decode("utf-8")
         headers = {
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Content-Type": "application/json"
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://captcha-bypass-api.replit.app",
+            "X-Title": "Captcha Bypass API",
         }
-
-        models = ["gpt-4o", "Phi-3.5-vision-instruct"]
-
-        for model_name in models:
-            payload = {
-                "model": model_name,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{img_b64}"
-                                }
-                            },
-                            {
-                                "type": "text",
-                                "text": CAPTCHA_PROMPT
-                            }
-                        ]
-                    }
+        prompt = (
+            "This is a captcha image showing a grid of numbered boxes. "
+            "Each box has a number written in it. One box ALSO contains a special "
+            "image or icon (ghost, animal, arrow, pac-man, or any object) placed "
+            "inside it alongside the number. All other boxes contain ONLY their "
+            "number with no image. "
+            "Find the box that has BOTH a number AND a special image/icon inside it. "
+            "Return ONLY that number, nothing else. No explanation, just the number."
+        )
+        payload = {
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+                    {"type": "text", "text": prompt},
                 ],
-                "max_tokens": 10,
-                "temperature": 0
-            }
-
+            }],
+            "max_tokens": 10,
+            "temperature": 0,
+        }
+        for model in OPENROUTER_MODELS:
+            payload["model"] = model
             try:
-                response = requests.post(
-                    GITHUB_API_URL, headers=headers, json=payload, timeout=20
-                )
-                print(f"🤖 {model_name} → HTTP {response.status_code}")
-
-                if response.status_code == 200:
-                    data = response.json()
-                    text = data["choices"][0]["message"]["content"].strip()
-                    numbers = re.findall(r'\d+', text)
-                    if numbers:
-                        print(f"✅ {model_name} SOLVED: {numbers[0]}")
-                        return numbers[0]
-                    else:
-                        print(f"⚠️ {model_name} returned no number: {text!r}")
-                elif response.status_code == 401:
-                    print("❌ GitHub token expired/invalid — update GITHUB_TOKEN in main.py")
-                    return None
+                resp = requests.post(OPENROUTER_URL, headers=headers,
+                                     json=payload, timeout=20)
+                print(f"🤖 {model} → HTTP {resp.status_code}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("choices"):
+                        text = data["choices"][0]["message"]["content"].strip()
+                        nums = re.findall(r"\d+", text)
+                        if nums:
+                            print(f"✅ AI SOLVED: {nums[0]}")
+                            return nums[0]
+                        print(f"⚠️ Non-numeric response: {text!r}")
                 else:
-                    print(f"⚠️ {model_name} error: {response.text[:200]}")
-
+                    print(f"⚠️ {resp.text[:150]}")
             except Exception as e:
-                print(f"⚠️ {model_name} exception: {e}")
-
+                print(f"⚠️ {model} error: {e}")
         return None
-
     except Exception as e:
-        print(f"AI Error: {e}")
+        print(f"AI error: {e}")
         return None
 
 
 # ============================================
-# TELEGRAM CLIENT + EVENT LOOP (shared)
+# CLICK CAPTCHA BUTTON
 # ============================================
-client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
+async def click_captcha_button(msg, number: str) -> bool:
+    """Click the inline button matching `number`. Return True if clicked."""
+    try:
+        if msg.buttons:
+            for row in msg.buttons:
+                for btn in row:
+                    if re.fullmatch(r"\D*" + re.escape(number) + r"\D*", btn.text.strip()):
+                        await msg.click(text=btn.text.strip())
+                        print(f"🖱️ CLICKED BUTTON: '{btn.text.strip()}'")
+                        return True
+            # No label match — try by index (number - 1)
+            flat = [b.text for row in msg.buttons for b in row]
+            print(f"⚠️ No label match for '{number}', buttons: {flat}")
+            try:
+                await msg.click(int(number) - 1)
+                print(f"🖱️ CLICKED BY INDEX: {int(number) - 1}")
+                return True
+            except Exception as e:
+                print(f"Index click error: {e}")
+    except Exception as e:
+        print(f"Button click error: {e}")
 
-# Shared state between Flask thread and Telegram thread
-_client_loop = None          # The event loop that owns the client
-_last_response = None        # Final bypassed link
-_bypass_active = False       # True while a bypass attempt is in progress
-_captcha_count = 0           # How many captchas solved in this session
-_current_url = None          # Original URL sent — filtered out of replies
+    # Final fallback: send as text
+    await client.send_message(BOT_USERNAME, number)
+    print(f"💬 SENT TEXT FALLBACK: {number}")
+    return True
+
+
+# ============================================
+# EXTRACT BYPASS LINK FROM BOT TEXT
+# ============================================
+def extract_bypass_link(text: str) -> str | None:
+    """Return the bypassed URL from the bot's response, or None."""
+    # Priority 1: "Bypassed Link: <url>"
+    m = re.search(
+        r"[Bb]ypass(?:ed)?\s*[Ll]ink\s*[:\*]*\s*\*{0,2}(https?://[^\s\*\)\n]+)",
+        text,
+    )
+    if m:
+        return m.group(1).rstrip("*").strip()
+
+    # Priority 2: any telegram.me / t.me / known bypass domain
+    links = re.findall(r"https?://[^\s\*\)\n]+", text)
+    for link in links:
+        link = link.rstrip("*").strip()
+        if any(d in link for d in ("telegram.me", "t.me", "bypass", "pages.dev")):
+            return link
+
+    return None
 
 
 # ============================================
 # TELEGRAM EVENT HANDLER
 # ============================================
-def _extract_bypassed_link(text, original_url):
-    """
-    Smart link extractor that handles the Nick Bypass Bot response format:
-
-        Original Link : 👇
-        ✅ https://original.com/...
-
-        Bypassed Link : 👇
-        ✅ https://actual-bypass.com/...
-
-    Strategy (in order):
-    1. Find the URL that appears right after "Bypassed Link" label.
-    2. Among all links, skip the original URL and prefer known bypass domains.
-    3. Take the last link in the message (bypassed link always comes after original).
-    """
-    all_links = re.findall(r'https?://[^\s\)\]>\u00ab\u00bb]+', text)
-    if not all_links:
-        return None
-
-    # Strip trailing punctuation from each link
-    all_links = [l.rstrip('.,;:!?') for l in all_links]
-
-    # 1. Look for "Bypassed Link" section explicitly
-    bypassed_section = re.search(
-        r'(?i)bypass(?:ed)?\s*(?:link|url)\s*[:\-👇\s]+\s*(https?://[^\s\)\]>]+)',
-        text
-    )
-    if bypassed_section:
-        link = bypassed_section.group(1).rstrip('.,;:!?')
-        print(f"🔍 Parsed 'Bypassed Link' section → {link}")
-        return link
-
-    # 2. Filter out the original URL, prefer known bypass indicators
-    candidates = [l for l in all_links if l.rstrip('/') != (original_url or '').rstrip('/')]
-    if candidates:
-        for l in candidates:
-            if any(k in l for k in ('generated.pages.dev', 'bypass', 'pages.dev', 'atlasclient')):
-                print(f"🔍 Preferred bypass domain → {l}")
-                return l
-        # Take the last candidate (bypassed link comes after original in the message)
-        print(f"🔍 Taking last non-original link → {candidates[-1]}")
-        return candidates[-1]
-
-    # 3. Fallback: last link in message
-    print(f"🔍 Fallback: last link → {all_links[-1]}")
-    return all_links[-1]
-
-
 @client.on(events.NewMessage(from_users=BOT_USERNAME))
 async def handler(event):
-    global _last_response, _bypass_active, _captcha_count, _current_url
-    msg = event.message
+    global active_session
+    msg  = event.message
+    sess = active_session   # snapshot — may be None
 
-    print(f"📩 Msg from bot: {repr(msg.text[:80]) if msg.text else '[photo]'}")
+    preview = (msg.text or "")[:60] or "📷 Photo"
+    label   = f"[{sess.attempts+1}/{sess.max_attempts}]" if sess else "[idle]"
+    print(f"📩 {label} Bot: {preview!r}")
 
-    # ── CAPTCHA IMAGE ──────────────────────────────────────────────
+    # ── CAPTCHA IMAGE ─────────────────────────────────────────────────
+    # Handle captcha ALWAYS — bot can send it at any time (random re-verification).
     if msg.photo:
-        _captcha_count += 1
-        print(f"🧩 Captcha #{_captcha_count} received — solving with GitHub AI...")
+        t0 = time.time()
         try:
+            # Download image (fast — already async)
             image_data = await client.download_media(msg.photo, bytes)
-            if image_data:
-                number = solve_captcha_github_ai(image_data)
-                if number:
-                    print(f"✅ Captcha #{_captcha_count} answer: {number} — sending...")
-                    await client.send_message(BOT_USERNAME, number)
-                    print(f"📤 Answer sent. Waiting for bot reply...")
-                else:
-                    print("❌ AI could not solve captcha — no answer sent")
+            if not image_data:
+                return
+
+            print(f"🧠 Solving captcha… (image {len(image_data)//1024}KB)")
+
+            # *** KEY SPEED FIX: run blocking AI call in thread executor ***
+            # This keeps the Telethon event loop completely free during AI call.
+            loop   = asyncio.get_event_loop()
+            number = await loop.run_in_executor(_executor, solve_captcha, image_data)
+
+            elapsed = time.time() - t0
+            if number:
+                print(f"⚡ Captcha solved in {elapsed:.1f}s → '{number}'")
+                await click_captcha_button(msg, number)
+
+                # Only resend URL if there is an active bypass session
+                await asyncio.sleep(0.3)   # tiny pause (was 2s) — bot responds fast
+                if sess and sess.attempts < sess.max_attempts:
+                    sess.attempts += 1
+                    print(f"🔄 Resending URL (attempt {sess.attempts}/{sess.max_attempts})…")
+                    await client.send_message(BOT_USERNAME, sess.url)
+                elif sess:
+                    print("⚠️ Max captcha attempts reached.")
+                    sess.bypass_done.set()
+                # If no active session (idle re-verification), button click is enough
+            else:
+                print(f"❌ AI failed to solve captcha after {elapsed:.1f}s")
+                if sess:
+                    sess.bypass_done.set()   # unblock bypass_url with no result
         except Exception as e:
-            print(f"❌ Captcha handler error: {e}")
+            print(f"Captcha handler error: {e}")
+            if sess:
+                sess.bypass_done.set()
+        return
 
-    # ── TEXT RESPONSE ──────────────────────────────────────────────
-    elif msg.text and _bypass_active:
-        text = msg.text
-        best = _extract_bypassed_link(text, _current_url)
-        if best:
-            _last_response = best
-            print(f"🎉 BYPASSED LINK: {best}")
-        else:
-            print(f"💬 Bot says (no link): {text[:120]}")
+    # ── TEXT / BYPASS RESPONSE ────────────────────────────────────────
+    if msg.text:
+        # Skip noisy status messages to keep logs clean
+        if msg.text.strip() in ("**Processing...**", "Processing..."):
+            return
+
+        print(f"📝 Bot: {msg.text!r}")
+
+        bypass_link = extract_bypass_link(msg.text)
+        if bypass_link and sess:
+            sess.result = bypass_link
+            print(f"✅ BYPASSED: {bypass_link}")
+            sess.bypass_done.set()
 
 
 # ============================================
-# BYPASS FUNCTION (runs in client's loop)
+# BYPASS COROUTINE  (runs on telegram_loop)
 # ============================================
-async def _do_bypass(url, timeout=90):
-    """Send url to bot, handle captchas automatically, return final link."""
-    global _last_response, _bypass_active, _captcha_count, _current_url
+async def do_bypass(url: str) -> str | None:
+    global active_session
 
-    _last_response = None
-    _bypass_active = True
-    _captcha_count = 0
-    _current_url = url.rstrip('/')
+    sess = BypassSession(url)
+    sess.captcha_done = asyncio.Event()
+    sess.bypass_done  = asyncio.Event()
+    active_session = sess
 
-    print(f"📤 Sending to bot: {url}")
-    await client.send_message(BOT_USERNAME, url)
+    try:
+        print(f"📤 SENDING: {url}")
+        await client.send_message(BOT_USERNAME, url)
 
-    start = time.time()
-    while (time.time() - start) < timeout:
-        if _last_response:
-            _bypass_active = False
-            return _last_response
-        await asyncio.sleep(1)
+        # Wait up to 120 s for the bypass link
+        try:
+            await asyncio.wait_for(sess.bypass_done.wait(), timeout=120)
+        except asyncio.TimeoutError:
+            print("⏰ Global timeout reached")
 
-    _bypass_active = False
-    return None
+        return sess.result
+    finally:
+        active_session = None
 
 
 # ============================================
 # FLASK ROUTES
 # ============================================
-@app.route('/bypass', methods=['GET', 'POST'])
+@app.route("/bypass", methods=["GET", "POST"])
 def bypass():
-    if request.method == 'GET':
-        url = request.args.get('url')
+    if request.method == "GET":
+        url = request.args.get("url")
     else:
-        data = request.json or {}
-        url = data.get('url')
+        url = (request.json or {}).get("url")
 
     if not url:
-        return jsonify({
-            'error': '❌ URL required',
-            'example': '/bypass?url=https://lksfy.com/xyz'
-        }), 400
+        return jsonify({"error": "❌ URL required", "example": "/bypass?url=https://..."}), 400
 
-    if _client_loop is None:
-        return jsonify({'error': '❌ Telegram client not ready yet'}), 503
+    if telegram_loop is None:
+        return jsonify({"error": "Telegram client not ready, retry in a moment"}), 503
 
-    # ── CACHE CHECK ────────────────────────────────────────────────
-    cached = cache_get(url)
-    if cached:
-        print(f"⚡ CACHE HIT: {url}")
-        return jsonify({
-            'status': '✅ SUCCESS (cached)',
-            'original': url,
-            'bypassed': cached,
-            'cache': True,
-            'timestamp': time.time()
-        })
+    print(f"\n{'='*55}\n🎯 TARGET: {url}\n{'='*55}")
 
-    print(f"\n{'='*50}")
-    print(f"🎯 TARGET: {url}")
-
-    future = asyncio.run_coroutine_threadsafe(_do_bypass(url), _client_loop)
+    future = asyncio.run_coroutine_threadsafe(do_bypass(url), telegram_loop)
     try:
-        result = future.result(timeout=100)
-    except Exception as e:
-        print(f"❌ Bypass error: {e}")
+        result = future.result(timeout=130)
+    except concurrent.futures.TimeoutError:
         result = None
-
-    print(f"{'='*50}\n")
+    except Exception as e:
+        return jsonify({"status": "❌ ERROR", "error": str(e)}), 500
 
     if result:
-        cache_set(url, result)   # store in cache
         return jsonify({
-            'status': '✅ SUCCESS',
-            'original': url,
-            'bypassed': result,
-            'cache': False,
-            'captchas_solved': _captcha_count,
-            'solver': 'GitHub AI (GPT-4o / Phi-3.5-vision)',
-            'timestamp': time.time()
+            "status":    "✅ SUCCESS",
+            "original":  url,
+            "bypassed":  result,
+            "solver":    "OpenRouter / nvidia-nemotron-vl",
+            "timestamp": time.time(),
         })
-    else:
-        return jsonify({
-            'status': '❌ FAILED',
-            'original': url,
-            'captchas_solved': _captcha_count,
-            'error': 'Timeout — captcha solve failed or GitHub token expired',
-            'timestamp': time.time()
-        }), 500
+    return jsonify({
+        "status":    "❌ FAILED",
+        "original":  url,
+        "error":     "Could not bypass after 3 captcha attempts",
+        "timestamp": time.time(),
+    }), 500
 
 
-@app.route('/status')
+@app.route("/status")
 def status():
-    # Quick token check
-    try:
-        r = requests.post(
-            GITHUB_API_URL,
-            headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Content-Type": "application/json"},
-            json={"model": "gpt-4o", "messages": [{"role": "user", "content": "1"}], "max_tokens": 1},
-            timeout=5
-        )
-        token_ok = r.status_code == 200
-        token_status = "✅ VALID" if token_ok else f"❌ INVALID (HTTP {r.status_code})"
-    except Exception:
-        token_status = "⚠️ UNREACHABLE"
-
     return jsonify({
-        'status': '🟢 ONLINE',
-        'telegram_bot': BOT_USERNAME,
-        'client_ready': _client_loop is not None,
-        'github_token': token_status,
-        'captchas_solved_total': _captcha_count,
+        "status":        "🟢 ONLINE",
+        "bot":           BOT_USERNAME,
+        "telegram":      "✅ CONNECTED" if telegram_loop else "⏳ CONNECTING",
+        "ai_provider":   "OpenRouter",
+        "active_bypass": active_session.url if active_session else None,
     })
 
 
-@app.route('/cache', methods=['GET'])
-def view_cache():
-    """Show all cached entries."""
-    with _cache_lock:
-        now = time.time()
-        entries = []
-        for url, entry in _cache.items():
-            age = int(now - entry["ts"])
-            remaining = max(0, CACHE_TTL - age)
-            entries.append({
-                'url': url,
-                'bypassed': entry['bypassed'],
-                'age_seconds': age,
-                'expires_in_seconds': remaining,
-            })
-    return jsonify({
-        'cache_ttl_hours': CACHE_TTL // 3600,
-        'total': len(entries),
-        'entries': entries
-    })
-
-
-@app.route('/cache/clear', methods=['GET', 'POST'])
-def clear_cache():
-    """Clear all cached entries."""
-    with _cache_lock:
-        count = len(_cache)
-        _cache.clear()
-    print(f"🗑️ Cache cleared — {count} entries removed")
-    return jsonify({'status': '✅ Cache cleared', 'removed': count})
-
-
-@app.route('/')
+@app.route("/")
 def home():
-    stats = cache_stats()
-    return f"""
+    return """
     <h1>🔥 DEMON 😈 CAPTCHA BYPASS API</h1>
-    <h3>🤖 BOT: Nick_Bypass_Bot &nbsp;|&nbsp; 🧠 AI: GitHub Models</h3>
-    <p>🚀 <code>/bypass?url=https://lksfy.com/xyz</code></p>
-    <p>📊 <code>/status</code> &nbsp;|&nbsp; 🗃️ <code>/cache</code> &nbsp;|&nbsp; 🗑️ <code>/cache/clear</code></p>
-    <hr>
-    <p>Cache: <b>{stats['alive_entries']}</b> live entries (TTL {stats['ttl_hours']}h)</p>
+    <h3>🤖 Bot: Nick_Bypass_Bot</h3>
+    <h3>🧠 AI: OpenRouter (NVIDIA Nemotron VL)</h3>
+    <p>🚀 <b>Usage:</b> <code>/bypass?url=https://get2short.com/AyZx</code></p>
+    <p>📊 <b>Status:</b> <a href="/status">/status</a></p>
+    <p>✅ Auto captcha solve → auto resend URL → returns bypass link</p>
     """
 
 
 # ============================================
-# START TELEGRAM CLIENT IN BACKGROUND THREAD
+# TELEGRAM CLIENT THREAD
 # ============================================
-async def _run_client():
-    global _client_loop
-    retry_delay = 5
-    while True:
-        try:
-            await client.connect()
-            print("✅ Telegram client connected!")
-            _client_loop = asyncio.get_event_loop()
-            await client.run_until_disconnected()
-        except Exception as e:
-            err = str(e)
-            print(f"⚠️  Telegram error: {err}")
-            is_dup = (
-                "two different IP" in err
-                or "AuthKeyDuplicated" in err
-                or "DuplicatedError" in err
-                or type(e).__name__ == "AuthKeyDuplicatedError"
-            )
-            if is_dup:
-                wait = min(retry_delay * 2, 120)
-                print(f"🔄 Session used from another IP — waiting {wait}s before retry...")
-                print("   ⚠️  Make sure the same SESSION_STRING is not active elsewhere.")
-                retry_delay = wait
-            else:
-                print(f"❌ Unhandled error — retrying in {retry_delay}s")
-            await asyncio.sleep(retry_delay)
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-            continue
+async def _run_telegram():
+    await client.connect()
+    if not await client.is_user_authorized():
+        print("❌ Session not authorized — generate a new session string.")
+        return
+    print("📡 Telegram client connected.")
+    await client.run_until_disconnected()
 
 
 def start_client():
-    global _client_loop
-    # Small random delay in production so dev and prod don't collide on connect
-    import os, random
-    if os.environ.get("REPLIT_DEPLOYMENT"):
-        delay = random.randint(3, 8)
-        print(f"🚀 Production env — waiting {delay}s before Telegram connect...")
-        time.sleep(delay)
+    global telegram_loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    _client_loop = loop
-    loop.run_until_complete(_run_client())
+    telegram_loop = loop
+    loop.run_until_complete(_run_telegram())
 
 
-if __name__ == '__main__':
+# ============================================
+# ENTRY POINT
+# ============================================
+if __name__ == "__main__":
     t = threading.Thread(target=start_client, daemon=True)
     t.start()
+    time.sleep(3)   # let Telegram connect first
+
     print("🔥 DEMON 😈 CAPTCHA BYPASS API STARTED!")
-    app.run(host='0.0.0.0', port=8080)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
