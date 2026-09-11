@@ -15,9 +15,9 @@ app = Flask(__name__)
 # ============================================
 # CREDENTIALS
 # ============================================
-API_ID   = 38012146
-API_HASH = "89bc5cfc4c0f138b7cfd97f19f8a06a7"
-SESSION_STRING = "1BVtsOLUBuwPDCLueAwhJi-aQqJlDWKqywRhzqGl8Y925SzS1WVSHHa7JBkwk3_Zsy3fSWMqJUIAe6YE2RT_57yGCR-LONabfNrGt5w7G-cLDRJSWesXOhRz4A655XYbQ7_QV2QuiuelXq1P08DpiRvuC_8PhXnwZJ_oFfSbD-mnsgvYJ8ICIDqOJqmR4atsasGmpIXr84ecw8GUJbMpT7Mpr-u1u7hFv-aQYT7-AXa7PcjTBa-EqaLyUJSJcT_fCleXKrapSlMjYJSTviKXkCu9_lRkNdcxGallSd6CBZy3zwOThN9HYcQLN4bgWtOmKaV2hjI05AOOht0f4fNgeAmDyeqI4kMs="
+API_ID   = 32128791
+API_HASH = "b6274d1ac3319bffcab4f9a6015167c7"
+SESSION_STRING = "1BVtsOIUBu2btOVaDfnrs6RBe1YRdn-Teue3Z0QT_Zw9RJoi7WZYKG7K6vosqwmhmOI1O84cBn7L5NR2S98NmQ9ixr3qrI30OoDB6VU_9nQI1TuNk34CcpwyOca5iIneaE2XCceunctFQOtU0Wk-PrvMO_BkSrZnJYEJoUhwhjxO5XB3mwJu2HnFitz9II_d13qztmJl7DDLK62FiDBs0YW09s71y_hyLSP85MAO5F1vYdtxHBup4FpnwvczhAZgDEKClWUD5dUakqOeeMBPq3HDMqRrqFhBcPwc8SinHFQscfS3M0k4pHYyMMRYL-zFs4EM4qu1hhW5ZDKsTrTfhYA90RY6bxb0="
 BOT_USERNAME = "alexbypassbot"
 
 # ============================================
