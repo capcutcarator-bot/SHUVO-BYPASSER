@@ -18,7 +18,7 @@ app = Flask(__name__)
 API_ID   = 38012146
 API_HASH = "89bc5cfc4c0f138b7cfd97f19f8a06a7"
 SESSION_STRING = "1BVtsOLUBuwPDCLueAwhJi-aQqJlDWKqywRhzqGl8Y925SzS1WVSHHa7JBkwk3_Zsy3fSWMqJUIAe6YE2RT_57yGCR-LONabfNrGt5w7G-cLDRJSWesXOhRz4A655XYbQ7_QV2QuiuelXq1P08DpiRvuC_8PhXnwZJ_oFfSbD-mnsgvYJ8ICIDqOJqmR4atsasGmpIXr84ecw8GUJbMpT7Mpr-u1u7hFv-aQYT7-AXa7PcjTBa-EqaLyUJSJcT_fCleXKrapSlMjYJSTviKXkCu9_lRkNdcxGallSd6CBZy3zwOThN9HYcQLN4bgWtOmKaV2hjI05AOOht0f4fNgeAmDyeqI4kMs="
-BOT_USERNAME = "Nick_Bypass_Bot"
+BOT_USERNAME = "alexbypassbot"
 
 # ============================================
 # OPENROUTER — FREE AI VISION
