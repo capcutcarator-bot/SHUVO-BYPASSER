@@ -17,8 +17,7 @@ app = Flask(__name__)
 # ============================================
 API_ID   = 32128791
 API_HASH = "b6274d1ac3319bffcab4f9a6015167c7"
-SESSION_STRING = "
-1BVtsOIUBu7nIY9hYbE4Ttg2iUCdl4_tMauCQK3WAm9Psu5B1AC9nneNusl0Dz-10rNfZaCiwIL-SLmDN2tBpfav4QFb6CkEceHNz86mBRa5phrHfb3f-0vgag6nvVcV74KkYvD1tJKNBuTA7BQ3zb7oHOoPaxc5DoyxSZ-mJCF4VQR_8XBbMT0tgrxi49y34cZww_8HF0hTL1x92nlRJQqUspnCJ7kRmFft_I3NDkrsnjjkLe1OV4kM1-i4ByHgLna1kjISSkDbo7SHTAWJiGTfHs51V7sOUKeL1cnYyrEnaiRKY_d-TWmq7HWz84I0CIgK9Dh0zyfhFw8Z3_DD0k82tAoCSGR8="
+SESSION_STRING = "1BVtsOIUBu7nIY9hYbE4Ttg2iUCdl4_tMauCQK3WAm9Psu5B1AC9nneNusl0Dz-10rNfZaCiwIL-SLmDN2tBpfav4QFb6CkEceHNz86mBRa5phrHfb3f-0vgag6nvVcV74KkYvD1tJKNBuTA7BQ3zb7oHOoPaxc5DoyxSZ-mJCF4VQR_8XBbMT0tgrxi49y34cZww_8HF0hTL1x92nlRJQqUspnCJ7kRmFft_I3NDkrsnjjkLe1OV4kM1-i4ByHgLna1kjISSkDbo7SHTAWJiGTfHs51V7sOUKeL1cnYyrEnaiRKY_d-TWmq7HWz84I0CIgK9Dh0zyfhFw8Z3_DD0k82tAoCSGR8="
 BOT_USERNAME = "Nick_Bypass_Bot"
 
 # ============================================
